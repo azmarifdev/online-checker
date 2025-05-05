@@ -13,42 +13,222 @@ const targetDeviceName = process.env.TARGET_DEVICE_NAME;
 // Initialize TP-Link client
 const client = new Client();
 
+// Session management
+let routerAuthToken = null;
+let tokenExpiry = null;
+let lastAuthAttempt = null;
+const AUTH_COOLDOWN = 30000; // 30 seconds between auth attempts
+const SESSION_TIMEOUT = 10 * 60 * 1000; // 10 minutes
+
 /**
  * Check if the target device is connected to the router
- * This function tries multiple methods to detect device status
+ * This function tries multiple methods in parallel for better reliability
  */
 async function checkDeviceStatus() {
     try {
         console.log('Checking device status...');
 
-        // Try each method in order until one succeeds
-        const methods = [
-            tryArcherC64DirectAccess, // Added specialized method for Archer C64
-            tryNetworkMapAccess,
-            tryTPLinkAPI,
-            tryRouterLogin,
-            tryDirectScraping,
-        ];
+        // Run multiple methods in parallel for faster and more reliable detection
+        const methodResults = await Promise.allSettled([
+            // Primary methods first - these directly check router status
+            runWithTimeout(tryArcherC64DirectAccess(), 5000, 'Archer C64 direct access'),
+            runWithTimeout(
+                tryGetAuthToken().then(() => tryWithAuth()),
+                7000,
+                'Authenticated router check',
+            ),
+            runWithTimeout(tryNetworkMapAccess(), 5000, 'Network Map access'),
+        ]);
 
-        for (const method of methods) {
-            try {
-                console.log(`Trying method: ${method.name}`);
-                const result = await method();
-                if (result !== null) {
-                    console.log(`Method ${method.name} returned: ${result ? 'ONLINE' : 'OFFLINE'}`);
-                    return result;
-                }
-            } catch (error) {
-                console.log(`Method ${method.name} failed: ${error.message}`);
+        // Process results in priority order
+        for (const result of methodResults) {
+            if (result.status === 'fulfilled' && result.value === true) {
+                console.log('Device found online by primary method');
+                return true;
             }
         }
 
-        // If all methods fail, return false (offline)
-        console.log('All methods failed, assuming device is offline');
+        // If primary methods didn't find the device, try fallback methods
+        const fallbackResults = await Promise.allSettled([
+            runWithTimeout(tryTPLinkAPI(), 8000, 'TP-Link API'),
+            runWithTimeout(tryDirectScraping(), 5000, 'Direct scraping'),
+        ]);
+
+        for (const result of fallbackResults) {
+            if (result.status === 'fulfilled' && result.value === true) {
+                console.log('Device found online by fallback method');
+                return true;
+            }
+        }
+
+        // If we got here, all methods either failed or returned false
         return false;
     } catch (error) {
-        console.error('Error checking device status:', error.message);
+        console.error('Error in device status check:', error.message);
         return false;
+    }
+}
+
+/**
+ * Run a promise with a timeout
+ * @param {Promise} promise - The promise to run
+ * @param {number} timeoutMs - Timeout in milliseconds
+ * @param {string} operationName - Name of the operation for logging
+ * @returns {Promise} - The result of the original promise or null if it times out
+ */
+async function runWithTimeout(promise, timeoutMs, operationName) {
+    try {
+        const timeoutPromise = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs);
+        });
+
+        return await Promise.race([promise, timeoutPromise]);
+    } catch (error) {
+        console.log(`${operationName} failed or timed out: ${error.message}`);
+        return null;
+    }
+}
+
+/**
+ * Get auth token for router access
+ */
+async function tryGetAuthToken() {
+    // Skip if we already have a valid token
+    const now = Date.now();
+    if (routerAuthToken && tokenExpiry && tokenExpiry > now) {
+        return routerAuthToken;
+    }
+
+    // Avoid hammering the router with auth requests
+    if (lastAuthAttempt && now - lastAuthAttempt < AUTH_COOLDOWN) {
+        throw new Error('Auth attempt too recent, cooling down');
+    }
+
+    lastAuthAttempt = now;
+
+    try {
+        // Try common auth endpoints
+        const authEndpoints = [`/cgi-bin/luci/login`, `/cgi-bin/luci/api/auth`, `/login`, `/api/auth`];
+
+        for (const endpoint of authEndpoints) {
+            try {
+                console.log(`Attempting authentication at ${endpoint}...`);
+                const response = await axios.post(
+                    `http://${routerIP}${endpoint}`,
+                    `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
+                    {
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'User-Agent':
+                                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                        },
+                        timeout: 5000,
+                    },
+                );
+
+                // Look for auth token in response
+                let token = null;
+
+                // Check response data for token
+                if (response.data) {
+                    if (typeof response.data === 'string' && response.data.includes('stok')) {
+                        const match = response.data.match(/stok=([^"&]+)/);
+                        if (match) token = match[1];
+                    } else if (response.data.token || response.data.stok) {
+                        token = response.data.token || response.data.stok;
+                    }
+                }
+
+                // Check cookies for token
+                if (!token && response.headers['set-cookie']) {
+                    const cookies = response.headers['set-cookie'].join(';');
+                    if (cookies.includes('sysauth=')) {
+                        const match = cookies.match(/sysauth=([^;]+)/);
+                        if (match) token = match[1];
+                    }
+                }
+
+                if (token) {
+                    console.log('Authentication successful');
+                    routerAuthToken = token;
+                    tokenExpiry = now + SESSION_TIMEOUT;
+                    return token;
+                }
+            } catch (err) {
+                console.log(`Auth attempt at ${endpoint} failed: ${err.message}`);
+            }
+        }
+
+        throw new Error('Failed to authenticate with router');
+    } catch (error) {
+        console.error('Router authentication error:', error.message);
+        routerAuthToken = null;
+        tokenExpiry = null;
+        throw error;
+    }
+}
+
+/**
+ * Try authenticated router access methods
+ */
+async function tryWithAuth() {
+    try {
+        if (!routerAuthToken) return null;
+
+        console.log('Trying authenticated device list access...');
+
+        // URLs to try with authentication
+        const urlsToTry = [
+            `/cgi-bin/luci/;stok=${routerAuthToken}/admin/status/online_clients`,
+            `/cgi-bin/luci/;stok=${routerAuthToken}/admin/status/online_clients/list`,
+            `/cgi-bin/luci/;stok=${routerAuthToken}/admin/status/client_list`,
+            `/data/status/device_list.json?token=${routerAuthToken}`,
+        ];
+
+        for (const url of urlsToTry) {
+            try {
+                const response = await axios.get(`http://${routerIP}${url}`, {
+                    headers: {
+                        'User-Agent':
+                            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                        Cookie: `sysauth=${routerAuthToken}`,
+                    },
+                    timeout: 4000,
+                });
+
+                if (response.data) {
+                    const data = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+                    const macFormats = generateMACFormats(targetMAC);
+
+                    // Check for MAC address
+                    for (const macFormat of macFormats) {
+                        if (data.includes(macFormat)) {
+                            console.log(`Found device MAC: ${macFormat} in authenticated access`);
+                            return true;
+                        }
+                    }
+
+                    // Check for device name
+                    if (data.includes(targetDeviceName)) {
+                        console.log(`Found device name: ${targetDeviceName} in authenticated access`);
+                        return true;
+                    }
+
+                    // If we get a response with client data but our device isn't in it
+                    if (data.includes('clients') || data.includes('online_clients') || data.includes('deviceList')) {
+                        console.log('Got device list but target device not found');
+                        return false;
+                    }
+                }
+            } catch (e) {
+                console.log(`Auth access failed for ${url}: ${e.message}`);
+            }
+        }
+
+        return null; // Signal to try next method
+    } catch (error) {
+        console.log('Authenticated access failed:', error.message);
+        return null;
     }
 }
 
@@ -247,52 +427,6 @@ async function tryTPLinkAPI() {
         });
     } catch (error) {
         console.log('TP-Link API method failed:', error.message);
-        return null; // Signal to try next method
-    }
-}
-
-/**
- * Try to login to router and check connected devices
- */
-async function tryRouterLogin() {
-    try {
-        // Basic auth for router login
-        const authString = Buffer.from(`${username}:${password}`).toString('base64');
-
-        // Try a different endpoint - some routers use this path
-        const response = await axios.get(`http://${routerIP}/admin/status?form=all`, {
-            headers: {
-                Authorization: `Basic ${authString}`,
-                'Content-Type': 'application/json',
-                Accept: 'application/json',
-                'User-Agent':
-                    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            },
-            timeout: 5000,
-        });
-
-        if (response.data) {
-            const data = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
-            const macFormats = generateMACFormats(targetMAC);
-
-            // Check if any MAC format is in the response
-            for (const macFormat of macFormats) {
-                if (data.includes(macFormat)) {
-                    console.log(`Found device MAC: ${macFormat} in router status`);
-                    return true;
-                }
-            }
-
-            // Also check device name
-            if (data.includes(targetDeviceName)) {
-                console.log(`Found device name: ${targetDeviceName} in router status`);
-                return true;
-            }
-        }
-
-        return false;
-    } catch (error) {
-        console.log('Router login attempt failed:', error.message);
         return null; // Signal to try next method
     }
 }
