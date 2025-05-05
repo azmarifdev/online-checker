@@ -1,0 +1,139 @@
+<%- include('partials/header') %>
+
+<div class="mb-8">
+    <h1 class="text-3xl font-bold text-gray-800 mb-2">Session History</h1>
+    <p class="text-gray-600">
+        Viewing activity for:
+        <span class="font-semibold"><%= deviceName %></span>
+    </p>
+</div>
+
+<!-- Date Navigation -->
+<div class="bg-white rounded-lg shadow-md p-6 mb-8">
+    <div class="flex justify-between items-center">
+        <a
+            href="/history?date=<%= previousDay %>"
+            class="bg-indigo-500 text-white py-2 px-4 rounded hover:bg-indigo-600 transition-colors">
+            <i class="fas fa-arrow-left mr-2"></i>
+            Previous Day
+        </a>
+
+        <div class="flex items-center">
+            <form action="/history" method="get" class="flex">
+                <input
+                    type="date"
+                    name="date"
+                    value="<%= date %>"
+                    class="border rounded py-2 px-3 text-gray-700 leading-tight focus:outline-none focus:ring focus:border-blue-300" />
+                <button
+                    type="submit"
+                    class="bg-gray-200 text-gray-700 py-2 px-4 rounded ml-2 hover:bg-gray-300 transition-colors">
+                    <i class="fas fa-search mr-2"></i>
+                    View
+                </button>
+            </form>
+        </div>
+
+        <% if (!isToday) { %>
+        <a
+            href="/history?date=<%= nextDay %>"
+            class="bg-indigo-500 text-white py-2 px-4 rounded hover:bg-indigo-600 transition-colors">
+            Next Day
+            <i class="fas fa-arrow-right ml-2"></i>
+        </a>
+        <% } else { %>
+        <a href="/" class="bg-green-500 text-white py-2 px-4 rounded hover:bg-green-600 transition-colors">
+            Today
+            <i class="fas fa-calendar-day ml-2"></i>
+        </a>
+        <% } %>
+    </div>
+</div>
+
+<!-- Summary Card -->
+<div class="bg-white rounded-lg shadow-md p-6 mb-8">
+    <h2 class="text-xl font-semibold text-gray-700 mb-4">Summary for <%= date %></h2>
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="bg-gray-50 p-6 rounded-lg text-center">
+            <span class="text-4xl font-bold text-indigo-500"><%= totalSessions %></span>
+            <p class="text-gray-500 mt-1">Total Sessions</p>
+        </div>
+        <div class="bg-gray-50 p-6 rounded-lg text-center">
+            <span class="text-4xl font-bold text-indigo-500"><%= totalTime %></span>
+            <p class="text-gray-500 mt-1">Total Online Time</p>
+        </div>
+    </div>
+</div>
+
+<!-- Sessions Table -->
+<div class="bg-white rounded-lg shadow-md p-6 mb-8">
+    <h2 class="text-xl font-semibold text-gray-700 mb-4">Session Details</h2>
+    <% if (sessions && sessions.length > 0) { %>
+    <div class="overflow-x-auto">
+        <table class="min-w-full">
+            <thead>
+                <tr class="bg-gray-100">
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Online Time
+                    </th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                        Offline Time
+                    </th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
+                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-200">
+                <% sessions.forEach(session => { %>
+                <tr>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><%= session.onlineTime %></td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><%= session.offlineTime %></td>
+                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-900"><%= session.duration %></td>
+                    <td class="px-6 py-4 whitespace-nowrap">
+                        <% if (session.isActive) { %>
+                        <span
+                            class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-green-100 text-green-800">
+                            Active
+                        </span>
+                        <% } else { %>
+                        <span
+                            class="px-2 inline-flex text-xs leading-5 font-semibold rounded-full bg-gray-100 text-gray-800">
+                            Ended
+                        </span>
+                        <% } %>
+                    </td>
+                </tr>
+                <% }); %>
+            </tbody>
+        </table>
+    </div>
+    <% } else { %>
+    <div class="text-center py-8 text-gray-500">
+        <i class="fas fa-calendar-times text-4xl mb-3"></i>
+        <p>No sessions recorded for this date</p>
+    </div>
+    <% } %>
+</div>
+
+<!-- Export Options -->
+<div class="bg-white rounded-lg shadow-md p-6 mb-8">
+    <h2 class="text-xl font-semibold text-gray-700 mb-4">Export Options</h2>
+    <div class="flex flex-wrap gap-4">
+        <a
+            href="/api/sessions/daily?date=<%= date %>"
+            target="_blank"
+            class="bg-indigo-500 text-white py-2 px-4 rounded flex items-center hover:bg-indigo-600 transition-colors">
+            <i class="fas fa-file-export mr-2"></i>
+            Export as JSON
+        </a>
+        <a
+            href="#"
+            class="bg-gray-200 text-gray-700 py-2 px-4 rounded flex items-center hover:bg-gray-300 transition-colors"
+            onclick="alert('CSV export feature coming soon!')">
+            <i class="fas fa-file-csv mr-2"></i>
+            Export as CSV
+        </a>
+    </div>
+</div>
+
+<%- include('partials/footer') %>
