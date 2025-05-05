@@ -1,6 +1,7 @@
 const DeviceSession = require('../models/DeviceSession');
 const routerUtils = require('./routerUtils');
 const emailUtils = require('./emailUtils');
+const pingUtils = require('./pingUtils');
 require('dotenv').config();
 
 // Keep track of the current device status
@@ -8,6 +9,7 @@ let isDeviceOnline = false;
 let currentSession = null;
 let lastCheckTime = null;
 let consecutiveChecks = 0;
+let deviceIP = null; // Will store the device IP if discovered
 
 /**
  * Check the device status and update session records
@@ -21,8 +23,18 @@ async function checkAndUpdateDeviceStatus() {
         const now = new Date();
         lastCheckTime = now;
 
-        // Get the current device status from the router
-        const isCurrentlyOnline = await routerUtils.checkDeviceStatus();
+        // Get the current device status using multiple methods
+        let isCurrentlyOnline = await routerUtils.checkDeviceStatus();
+
+        // If we have a device IP and router check failed, try ping as backup
+        if (!isCurrentlyOnline && deviceIP) {
+            console.log(`Router check says device is offline, trying ping to ${deviceIP} as backup...`);
+            const pingResult = await pingUtils.pingDevice(deviceIP);
+            if (pingResult) {
+                console.log(`Ping to ${deviceIP} succeeded! Device is actually online.`);
+                isCurrentlyOnline = true;
+            }
+        }
 
         // Device just came online
         if (isCurrentlyOnline && !isDeviceOnline) {
@@ -48,16 +60,20 @@ async function checkAndUpdateDeviceStatus() {
                 // Update the device status
                 isDeviceOnline = true;
                 consecutiveChecks = 0;
+
+                // Try to discover device IP for future ping checks
+                await discoverDeviceIP();
             } else {
                 console.log(`Detected possible online status. Confirming on next check...`);
             }
         }
         // Device just went offline
         else if (!isCurrentlyOnline && isDeviceOnline) {
-            // To avoid false negatives, require 2 consecutive checks
+            // To avoid false negatives, require 3 consecutive checks
+            // Using 3 instead of 2 for going offline to avoid premature session ending
             consecutiveChecks++;
 
-            if (consecutiveChecks >= 2) {
+            if (consecutiveChecks >= 3) {
                 console.log(`${deviceName} went OFFLINE at ${now.toLocaleString()}`);
 
                 if (currentSession) {
@@ -77,8 +93,9 @@ async function checkAndUpdateDeviceStatus() {
                 // Update the device status
                 isDeviceOnline = false;
                 consecutiveChecks = 0;
+                deviceIP = null; // Clear stored IP
             } else {
-                console.log(`Detected possible offline status. Confirming on next check...`);
+                console.log(`Detected possible offline status. Confirming on next check... (${consecutiveChecks}/3)`);
             }
         } else {
             // Status is consistent, reset counter
@@ -90,6 +107,38 @@ async function checkAndUpdateDeviceStatus() {
     } catch (error) {
         console.error('Error updating device status:', error);
         return isDeviceOnline;
+    }
+}
+
+/**
+ * Try to discover the device IP address for ping checks
+ */
+async function discoverDeviceIP() {
+    try {
+        console.log('Trying to discover device IP address...');
+
+        // Simple implementation - scan common IP addresses on home network
+        const baseIP = process.env.ROUTER_IP.split('.');
+        const subnet = baseIP.slice(0, 3).join('.');
+
+        // Try a few common IP addresses that might be assigned by DHCP
+        const commonLastOctets = [2, 3, 4, 5, 10, 11, 12, 100, 101, 102];
+
+        for (const lastOctet of commonLastOctets) {
+            const ip = `${subnet}.${lastOctet}`;
+            console.log(`Checking if ${ip} might be our device...`);
+
+            const isReachable = await pingUtils.pingDevice(ip);
+            if (isReachable) {
+                console.log(`Found reachable IP: ${ip} - storing as potential device IP`);
+                deviceIP = ip;
+                return;
+            }
+        }
+
+        console.log('Could not discover device IP address');
+    } catch (error) {
+        console.error('Error discovering device IP:', error);
     }
 }
 
@@ -211,6 +260,9 @@ async function initialize() {
 
             await currentSession.save();
             console.log(`Created a new session for currently online device at ${new Date().toLocaleString()}`);
+
+            // Try to discover device IP for future ping checks
+            await discoverDeviceIP();
         }
 
         console.log('Device tracker initialized successfully');
